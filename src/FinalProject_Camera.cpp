@@ -19,6 +19,7 @@
 #include "objectDetection2D.hpp"
 #include "lidarData.hpp"
 #include "camFusion.hpp"
+#include "utils.hpp"
 
 using namespace std;
 
@@ -73,6 +74,12 @@ int main(int argc, const char *argv[])
     int dataBufferSize = 2;       // no. of images which are held in memory (ring buffer) at the same time
     vector<DataFrame> dataBuffer; // list of data frames which are held in memory at the same time
     bool bVis = false;            // visualize results
+
+    // Clear any existing data from the results file only once before the loop starts
+    std::string resultsFilename = "../analysis/results.csv";
+    std::ofstream outFile(resultsFilename, std::ios::out | std::ios::trunc);
+    outFile.close();
+
 
     /* MAIN LOOP OVER ALL IMAGES */
 
@@ -132,7 +139,7 @@ int main(int argc, const char *argv[])
         bVis = true;
         if(bVis)
         {
-            show3DObjects((dataBuffer.end()-1)->boundingBoxes, cv::Size(4.0, 20.0), cv::Size(2000, 2000), true);
+            show3DObjects((dataBuffer.end()-1)->boundingBoxes, cv::Size(4.0, 20.0), cv::Size(1000, 1000), true);
         }
         bVis = false;
 
@@ -140,7 +147,7 @@ int main(int argc, const char *argv[])
         
         
         // REMOVE THIS LINE BEFORE PROCEEDING WITH THE FINAL PROJECT
-        continue; // skips directly to the next image without processing what comes beneath
+        // skips directly to the next image without processing what comes beneath
 
         /* DETECT IMAGE KEYPOINTS */
 
@@ -150,15 +157,40 @@ int main(int argc, const char *argv[])
 
         // extract 2D keypoints from current image
         vector<cv::KeyPoint> keypoints; // create empty feature list for current image
-        string detectorType = "SHITOMASI";
+        std::vector<string> detectorList = {"SHITOMASI", "HARRIS", "FAST", "BRISK", "ORB", "AKAZE", "SIFT"};
+        string detectorType = detectorList[0]; // 0 - SHITOMASI, 1 - HARRIS, 2 - FAST, 3 - BRISK, 4 - ORB, 5 - AKAZE, 6 - SIFT
 
         if (detectorType.compare("SHITOMASI") == 0)
         {
             detKeypointsShiTomasi(keypoints, imgGray, false);
         }
+        else if (detectorType.compare("HARRIS") == 0)
+        {
+            detKeypointsHarris(keypoints, imgGray, false);
+        }
+        else if (detectorType.compare("FAST") == 0)
+        {
+            detKeypointsFast(keypoints, imgGray, false);
+        }
+        else if (detectorType.compare("BRISK") == 0)
+        {
+            detKeypointsBrisk(keypoints, imgGray, false);
+        }
+        else if (detectorType.compare("ORB") == 0)
+        {
+            detKeypointsOrb(keypoints, imgGray, false);
+        }
+        else if (detectorType.compare("AKAZE") == 0)
+        {
+            detKeypointsAkaze(keypoints, imgGray, false);
+        }
+        else if (detectorType.compare("SIFT") == 0)
+        {
+            detKeypointsSift(keypoints, imgGray, false);
+        }
         else
         {
-            //...
+            throw std::runtime_error("Unsupported detector type: " + detectorType);
         }
 
         // optional : limit number of keypoints (helpful for debugging and learning)
@@ -184,7 +216,8 @@ int main(int argc, const char *argv[])
         /* EXTRACT KEYPOINT DESCRIPTORS */
 
         cv::Mat descriptors;
-        string descriptorType = "BRISK"; // BRISK, BRIEF, ORB, FREAK, AKAZE, SIFT
+        std::vector<string> descriptorList = {"BRISK", "BRIEF", "ORB", "FREAK", "AKAZE", "SIFT"};
+        string descriptorType = descriptorList[0]; // 0 - BRISK, 1 - BRIEF, 2 - ORB, 3 - FREAK, 4 - AKAZE, 5 - SIFT
         descKeypoints((dataBuffer.end() - 1)->keypoints, (dataBuffer.end() - 1)->cameraImg, descriptors, descriptorType);
 
         // push descriptors for current frame to end of data buffer
@@ -266,6 +299,9 @@ int main(int argc, const char *argv[])
                     clusterKptMatchesWithROI(*currBB, (dataBuffer.end() - 2)->keypoints, (dataBuffer.end() - 1)->keypoints, (dataBuffer.end() - 1)->kptMatches);                    
                     computeTTCCamera((dataBuffer.end() - 2)->keypoints, (dataBuffer.end() - 1)->keypoints, currBB->kptMatches, sensorFrameRate, ttcCamera);
                     //// EOF STUDENT ASSIGNMENT
+                    
+                    // Save results to CSV file for further analysis
+                    writeResultsToCSV(resultsFilename, ttcLidar, ttcCamera, imgIndex, currBB->lidarPoints.size(), currBB->xmin, currBB->xw, currBB->yw);
 
                     bVis = true;
                     if (bVis)
@@ -281,8 +317,8 @@ int main(int argc, const char *argv[])
                         string windowName = "Final Results : TTC";
                         cv::namedWindow(windowName, 4);
                         cv::imshow(windowName, visImg);
-                        cout << "Press key to continue to next frame" << endl;
-                        cv::waitKey(0);
+                        cout << "Press any key to continue to next frame" << endl;
+                        cv::waitKey(0); // wait for key to be pressed
                     }
                     bVis = false;
 

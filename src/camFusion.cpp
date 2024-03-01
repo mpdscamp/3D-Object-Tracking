@@ -79,13 +79,14 @@ void show3DObjects(std::vector<BoundingBox> &boundingBoxes, cv::Size worldSize, 
 
         // plot Lidar points into top view image
         int top=1e8, left=1e8, bottom=0.0, right=0.0; 
-        float xwmin=1e8, ywmin=1e8, ywmax=-1e8;
+        float xwmin=1e8, ywmin=1e8, ywmax=-1e8, xwmax=-1e8;
         for (auto it2 = it1->lidarPoints.begin(); it2 != it1->lidarPoints.end(); ++it2)
         {
             // world coordinates
             float xw = (*it2).x; // world position in m with x facing forward from sensor
             float yw = (*it2).y; // world position in m with y facing left from sensor
             xwmin = xwmin<xw ? xwmin : xw;
+            xwmax = xwmax>xw ? xwmax : xw;
             ywmin = ywmin<yw ? ywmin : yw;
             ywmax = ywmax>yw ? ywmax : yw;
 
@@ -106,6 +107,11 @@ void show3DObjects(std::vector<BoundingBox> &boundingBoxes, cv::Size worldSize, 
         // draw enclosing rectangle
         cv::rectangle(topviewImg, cv::Point(left, top), cv::Point(right, bottom),cv::Scalar(0,0,0), 2);
 
+        // Store xmin and yw values for the current bounding box
+        it1->xmin = xwmin;
+        it1->xw = xwmax - xwmin;
+        it1->yw = ywmax - ywmin;
+    
         // augment object with some key data
         char str1[200], str2[200];
         sprintf(str1, "id=%d, #pts=%d", it1->boxID, (int)it1->lidarPoints.size());
@@ -138,7 +144,40 @@ void show3DObjects(std::vector<BoundingBox> &boundingBoxes, cv::Size worldSize, 
 // associate a given bounding box with the keypoints it contains
 void clusterKptMatchesWithROI(BoundingBox &boundingBox, std::vector<cv::KeyPoint> &kptsPrev, std::vector<cv::KeyPoint> &kptsCurr, std::vector<cv::DMatch> &kptMatches)
 {
-    // ...
+    std::vector<cv::DMatch> filteredMatches;
+    std::vector<double> distances;
+
+    for (auto &match: kptMatches) {
+        cv::KeyPoint currKpt = kptsCurr[match.trainIdx];
+
+        if (boundingBox.roi.contains(currKpt.pt)) {
+            distances.push_back(cv::norm(kptsPrev[match.queryIdx].pt - currKpt.pt));
+            filteredMatches.push_back(match);
+        }   
+    }
+
+    if (!distances.empty()) {
+        // Calculate the median distance
+        std::nth_element(distances.begin(), distances.begin() + distances.size() / 2, distances.end());
+        double medianDistance = distances[distances.size() / 2];
+
+        if (distances.size() % 2 == 0) {
+            medianDistance = (medianDistance + *std::max_element(distances.begin(), distances.begin() + distances.size() / 2)) / 2.0;
+        }
+
+        // Remove outliers
+        double distanceThreshold = 1.5 * medianDistance;
+
+        auto it = std::remove_if(filteredMatches.begin(), filteredMatches.end(),
+                                 [&](const cv::DMatch &match) {
+                                     double dist = cv::norm(kptsPrev[match.queryIdx].pt - kptsCurr[match.trainIdx].pt);
+                                     return dist > distanceThreshold;
+                                 });
+
+        filteredMatches.erase(it, filteredMatches.end());
+    }
+
+    boundingBox.kptMatches = filteredMatches;
 }
 
 
@@ -146,18 +185,125 @@ void clusterKptMatchesWithROI(BoundingBox &boundingBox, std::vector<cv::KeyPoint
 void computeTTCCamera(std::vector<cv::KeyPoint> &kptsPrev, std::vector<cv::KeyPoint> &kptsCurr, 
                       std::vector<cv::DMatch> kptMatches, double frameRate, double &TTC, cv::Mat *visImg)
 {
-    // ...
+    // compute distance ratios between all matched keypoints
+    vector<double> distRatios; // stores the distance ratios for all keypoints between curr. and prev. frame
+    for (auto it1 = kptMatches.begin(); it1 != kptMatches.end() - 1; ++it1)
+    { // outer kpt. loop
+
+        // get current keypoint and its matched partner in the prev. frame
+        cv::KeyPoint kpOuterCurr = kptsCurr.at(it1->trainIdx);
+        cv::KeyPoint kpOuterPrev = kptsPrev.at(it1->queryIdx);
+
+        for (auto it2 = kptMatches.begin() + 1; it2 != kptMatches.end(); ++it2)
+        { // inner kpt.-loop
+
+            double minDist = 100.0; // min. required distance
+
+            // get next keypoint and its matched partner in the prev. frame
+            cv::KeyPoint kpInnerCurr = kptsCurr.at(it2->trainIdx);
+            cv::KeyPoint kpInnerPrev = kptsPrev.at(it2->queryIdx);
+
+            // compute distances and distance ratios
+            double distCurr = cv::norm(kpOuterCurr.pt - kpInnerCurr.pt);
+            double distPrev = cv::norm(kpOuterPrev.pt - kpInnerPrev.pt);
+
+            if (distPrev > std::numeric_limits<double>::epsilon() && distCurr >= minDist)
+            { // avoid division by zero
+
+                double distRatio = distCurr / distPrev;
+                distRatios.push_back(distRatio);
+            }
+        } // eof inner loop over all matched kpts
+    }     // eof outer loop over all matched kpts
+
+    if (distRatios.size() == 0)
+    {
+        TTC = NAN;
+        return;
+    }
+
+    std::sort(distRatios.begin(), distRatios.end());
+    long medIndex = floor(distRatios.size() / 2.0);
+    double medDistRatio = distRatios.size() % 2 == 0 ? (distRatios[medIndex - 1] + distRatios[medIndex]) / 2.0 : distRatios[medIndex]; // compute median dist. ratio to remove outlier influence
+
+    double dT = 1 / frameRate;
+    TTC = -dT / (1 - medDistRatio);
 }
 
 
 void computeTTCLidar(std::vector<LidarPoint> &lidarPointsPrev,
-                     std::vector<LidarPoint> &lidarPointsCurr, double frameRate, double &TTC)
-{
-    // ...
+                     std::vector<LidarPoint> &lidarPointsCurr, double frameRate, double &TTC) {
+    double dT = 1.0 / frameRate; // Time between frames
+    double laneWidth = 4.0; // Lane width in meters
+
+    std::vector<double> prevX, currX;
+    for (auto &it : lidarPointsPrev) {
+        if (std::abs(it.y) < laneWidth / 2.0) {
+            prevX.push_back(it.x);
+        }
+    }
+
+    for (auto &it : lidarPointsCurr) {
+        if (std::abs(it.y) < laneWidth / 2.0) {
+            currX.push_back(it.x);
+        }
+    }
+
+    // Calculate median of previous frame LiDAR points
+    double prevMedianX = 1e9, currMedianX = 1e9;
+    if (!prevX.empty()) {
+        std::sort(prevX.begin(), prevX.end());
+        size_t midIndex = prevX.size() / 2;
+        prevMedianX = (prevX.size() % 2 == 0) ? (prevX[midIndex - 1] + prevX[midIndex]) / 2.0 : prevX[midIndex];
+    }
+
+    // Calculate median of current frame LiDAR points
+    if (!currX.empty()) {
+        std::sort(currX.begin(), currX.end());
+        size_t midIndex = currX.size() / 2;
+        currMedianX = (currX.size() % 2 == 0) ? (currX[midIndex - 1] + currX[midIndex]) / 2.0 : currX[midIndex];
+    }
+
+    // Prevent division by zero and ensure there are points to calculate TTC
+    if (prevMedianX - currMedianX == 0 || prevX.empty() || currX.empty()) {
+        TTC = std::numeric_limits<double>::infinity(); // Undefined TTC
+    } else {
+        TTC = currMedianX * dT / (prevMedianX - currMedianX);
+    }
 }
 
 
 void matchBoundingBoxes(std::vector<cv::DMatch> &matches, std::map<int, int> &bbBestMatches, DataFrame &prevFrame, DataFrame &currFrame)
 {
-    // ...
+    std::map<std::pair<int, int>, int> bbMatches;
+
+    for (auto match : matches) {
+        cv::KeyPoint prevKpt = prevFrame.keypoints[match.queryIdx];
+        cv::KeyPoint currKpt = currFrame.keypoints[match.trainIdx];
+
+        for (auto prevBB : prevFrame.boundingBoxes) {
+            if (prevBB.roi.contains(prevKpt.pt)) {
+                for (auto currBB : currFrame.boundingBoxes) {
+                    if (currBB.roi.contains(currKpt.pt)) {
+                        bbMatches[std::make_pair(prevBB.boxID, currBB.boxID)]++;
+                    }
+                }
+            }
+        }
+    }
+
+    for (auto& prevBB : prevFrame.boundingBoxes) {
+        int maxCount = -1;
+        int bestMatch = -1;
+        for (auto& currBB : currFrame.boundingBoxes) {
+            int count = bbMatches[std::make_pair(prevBB.boxID, currBB.boxID)];
+            if (count > maxCount) {
+                maxCount = count;
+                bestMatch = currBB.boxID;
+            }
+        }
+        if (bestMatch != -1) {
+            bbBestMatches[prevBB.boxID] = bestMatch;
+        }
+    }
 }
