@@ -1,3 +1,0 @@
-/home/mpdscamp/Documents/SFND-3D-Object-Tracking/build/CMakeFiles/rebuild_cache.dir
-/home/mpdscamp/Documents/SFND-3D-Object-Tracking/build/CMakeFiles/edit_cache.dir
-/home/mpdscamp/Documents/SFND-3D-Object-Tracking/build/CMakeFiles/3D_object_tracking.dir
